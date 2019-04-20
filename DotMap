@@ -1,0 +1,71 @@
+library(ggplot2)
+library(rgdal)
+library(sp)
+library(sqldf)
+
+proj <- "+proj=aea +lat_1=29.5 +lat_2=45.5 +lon_0=97.2w"
+
+#get state borders
+#you will need a shapefile of state boundaries, found here:  https://www.census.gov/cgi-bin/geo/shapefiles/index.php?year=2018&layergroup=States+%28and+equivalent%29
+borders <- readOGR("C:/Users/Erin/StateBoundaries", "cb_2017_us_state_500k")
+borders <-spTransform(borders, CRS(proj))
+borders <- subset(borders, !(STATEFP %in% c("02", "15", "60", "66", "69", "72", "78")))
+
+#get a collection of points to map. In my case, they're Mexican restaurant chains.
+#format of csv:  State (indicates if the restaurant is in the continental US or not), LATITUDE, LONGITUDE, ShortName (name of restaurant)
+mexican <- read.csv("chains_latlong.csv")
+
+#force any chains we don't care about to "other"
+chains <- c('tacobell','tacojohns','chipotlemexicangrill','moessouthwestgrill', 'tacotime', 'qdobamexicaneats', 'deltaco')
+mexican$ShortName[!(mexican$ShortName %in% chains)] <- "Other"
+mexican_cont <- subset(mexican, (State == 'CONT'))
+
+#truncate lat/longs to .25 degree cells
+cellsize <- .25
+mexican_cont$X <- cellsize/2 + cellsize*floor(mexican_cont$LONGITUDE/cellsize)
+mexican_cont$Y <- cellsize/2 + cellsize*floor(mexican_cont$LATITUDE/cellsize)
+
+#map these coordinates to proper projection
+coordinates(mexican_cont) <- ~ X + Y
+proj4string(mexican_cont) =CRS("+proj=longlat")
+mexican_cont <- spTransform(mexican_cont, CRS(proj))
+mexican_cont <- as.data.frame(mexican_cont)
+
+#find most common chain in each cell. In case of a tie, takes the first one alphabetically
+#this is some gruesome SQL but sqldf doesn't support OVER(), which I'd prefer to use
+mexcount <- sqldf("Select MaxCount.X, MaxCount.Y, Min(Counts.ShortName) as ShortName From
+                    (Select X, Y, Max(C) as M FROM 
+                      (Select X, Y, ShortName, Count(ShortName) as C from mexican_cont GROUP BY X, Y) 
+                    GROUP BY X, Y) as MaxCount
+                  INNER JOIN
+                    (Select X, Y, ShortName, Count(ShortName) as C from mexican_cont GROUP BY X, Y) as Counts
+                  on MaxCount.M = Counts.C and MaxCount.X = Counts.X and MaxCount.Y = Counts.Y
+                  GROUP BY MaxCount.X, MaxCount.Y
+                  ")
+
+#plot it all
+plotcolors <- c('Other' = '#c3c3c3',
+                'tacobell' = '#8c2add',
+                'tacojohns' = '#07bae8',
+                'chipotlemexicangrill' = '#fe4d64',
+                'tacotime' = '#56b568', 
+                'qdobamexicaneats' = '#F89D1C',
+                'moessouthwestgrill' = '#ffe019',
+                'deltaco' = '#fe9ea5')
+                
+blankbg <-theme(axis.line=element_blank(),axis.text.x=element_blank(),
+                axis.text.y=element_blank(),axis.ticks=element_blank(),
+                axis.title.x=element_blank(), axis.title.y=element_blank(),
+                panel.background=element_blank(),panel.border=element_blank(),panel.grid.major=element_blank(),
+                panel.grid.minor=element_blank(),plot.background=element_blank())
+
+ggplot()  + coord_equal() +  blankbg   +
+  geom_polygon(data = borders, mapping = aes(long, lat, group = group),
+               fill = NA, color = "#a0a0a0", size = .25) +
+  geom_point(data = mexcount, aes(x = X, y = Y, color = ShortName), size =.5) +
+  scale_color_manual(values=plotcolors, guide = FALSE) +
+ 
+ggsave("dotplot.png", plot = last_plot(),
+       scale = 1, width = 7, height = 9, units = "in",
+       dpi = 500)
+
