@@ -63,7 +63,7 @@ ggplot()  + coord_equal() +  blankbg   +
   geom_polygon(data = borders, mapping = aes(long, lat, group = group),
                fill = NA, color = "#a0a0a0", size = .25) +
   geom_point(data = mexcount, aes(x = X, y = Y, color = ShortName), size =.5) +
-  scale_color_manual(values=plotcolors, guide = FALSE) +
+  scale_color_manual(values=plotcolors, guide = FALSE) 
  
 ggsave("dotplot.png", plot = last_plot(),
        scale = 1, width = 7, height = 9, units = "in",
