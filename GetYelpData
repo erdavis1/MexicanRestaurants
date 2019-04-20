@@ -1,0 +1,131 @@
+library(httr)
+library(tidyverse)
+library(magrittr)
+library(rgdal)
+library(dplyr)
+library(sf)
+library(tidyr)
+library(sqldf)
+
+counties <- read.csv("counties.csv")
+
+key <- "MY YELP API KEY HERE"
+mexican <- NULL
+#-----------------functions-------------
+yelp_httr_get <- function(search, offset, key) {
+  url <- paste0("https://api.yelp.com/v3/businesses/search?&term=restaurants&location=", search, "%20usa",
+                "&categories=mexican&limit=50&offset=", offset)
+  res <- GET(url, add_headers('Authorization' = paste("bearer", key)))
+  results <- content(res)
+  results.list <- lapply(results$businesses, FUN = yelp_httr_parse)
+  results.df <- do.call(rbind.data.frame, results.list) 
+  if (nrow(results.df) > 0) {results.df$total <- results$total}
+  
+  return(results.df)
+}
+
+yelp_httr_parse <- function(x) {
+  #function from Bill Petti: https://billpetti.github.io/
+  parse_list <- list(id = x$id, 
+                     name = x$name, 
+                     rating = x$rating, 
+                     price = x$price,
+                     review_count = x$review_count, 
+                     latitude = x$coordinates$latitude, 
+                     longitude = x$coordinates$longitude, 
+                     address1 = x$location$address1, 
+                     city = x$location$city, 
+                     state = x$location$state,
+                     zipcode = x$location$zip_code,
+                     isclosed = x$is_closed)
+  
+  parse_list <- lapply(parse_list, FUN = function(x) ifelse(is.null(x), "", x))
+  
+  df <- tibble(id=parse_list$id,
+                   name=parse_list$name, 
+                   rating = parse_list$rating, 
+                   price = parse_list$price, 
+                   review_count = parse_list$review_count, 
+                   latitude=parse_list$latitude, 
+                   longitude = parse_list$longitude, 
+                   address1 = parse_list$address1, 
+                   city = parse_list$city, 
+                   state = parse_list$state, 
+                   zipcode = parse_list$zipcode, 
+                   isclosed= parse_list$isclosed)
+  return(df)
+}
+
+#-----------------get Yelp Data-----------
+#Loop through all counties and get Mexican restaurants in each. Repeat this code block, but with list of ZIPs, if desired.
+#this block will likely take several days to run bc of Yelp API limits. It'll break before the limit is hit so it's easy to pick back up.
+apicalls <- 0
+
+for (j in 1:nrow(counties)) {
+  if (apicalls >= 4900) {break}
+  
+  #for counties
+  state <- gsub(" ", "%20", counties$state[j])
+  search <- paste0(gsub(" ", "%20", counties$county[j]), ",%20",  state)
+  
+  #for zips
+  #search <- paste0(counties$zip[j], ",%20",  state)
+  
+  #get results for this county
+  temp <- yelp_httr_get(search, 0, key)
+  apicalls <- apicalls + 1
+  
+  #if there are results...
+  if (nrow(temp) > 0) {
+    mexican <- temp %>% rbind(mexican)
+    
+    #loop thru following runs
+    limit <- floor(temp$total[1]/50)
+    if (limit > 0) {
+      for (i in 1:limit) {
+        temp <- yelp_httr_get(search, i*50, key)
+        mexican <- temp %>% rbind(mexican)
+        apicalls = apicalls + 1
+      }
+    }
+  }
+  
+  #every 25 loops, remove dups to prevent the df from getting huge
+  if (j%%25==0) {
+    mexican$total <- 0
+    mexican <- unique(mexican)
+    print(j)
+  }
+}
+
+mexican <- unique(mexican)
+
+
+#-----------------match restaurants to counties-----------
+#you will need a shapefile of US counties, found here: 
+#https://www.census.gov/cgi-bin/geo/shapefiles/index.php?year=2018&layergroup=Counties+%28and+equivalent%29
+
+counties  <- read_sf("C:/Users/Erin/Counties", "cb_2017_us_county_500k")
+
+pnts <- mexican %>% select(longitude, latitude)
+pnts <- subset(pnts, !(longitude ==''))
+pnts$longitude <- as.numeric(pnts$longitude)
+pnts$latitude <- as.numeric(pnts$latitude)
+
+
+# create a points collection
+pnts_sf <- do.call("st_sfc",c(lapply(1:nrow(pnts), 
+                                     function(i) {st_point(as.numeric(pnts[i, ]))}), list("crs" = 4326))) 
+
+pnts_trans <- st_transform(pnts_sf, 2163) # apply transformation to pnts sf
+counties_trans <- st_transform(counties, 2163)      # apply transformation to polygons sf
+
+# intersect and extract county id
+pnts$GEOID <- apply(st_intersects(counties_trans, pnts_trans, sparse = FALSE), 2, 
+                     function(col) {counties_trans[which(col), ]$GEOID})
+pnts  <- unnest(pnts, GEOID)
+
+#map points back to ids
+final <- sqldf("Select distinct mexican.*, pnts.GEOID from mexican inner join pnts on 
+                mexican.latitude = pnts.latitude and mexican.longitude = pnts.longitude")
+
